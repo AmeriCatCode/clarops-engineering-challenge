@@ -20,6 +20,32 @@ sdk env
 
 ---
 
+## Environment File
+
+The Docker stack requires a `.env` file inside the `docker/` folder. An `example.env` is
+provided as a template. Copy it and set the values you want to use:
+
+```bash
+cp docker/example.env docker/.env
+```
+
+Then edit `docker/.env` and replace the placeholder values:
+
+| Variable          | Description                        | Default              |
+|-------------------|------------------------------------|----------------------|
+| `PG_HOST_PORT`    | Host port mapped to PostgreSQL     | `5432`               |
+| `PG_USERNAME`     | PostgreSQL user                    | `clarops`            |
+| `PG_PASSWORD`     | PostgreSQL user password           | `CHANGE_ME`          |
+| `PG_DATABASE`     | Database name                      | `clarops_challenge`  |
+| `PG_ADMIN_PASSWORD` | Password for the `postgres` admin user | `CHANGE_ME_ADMIN` |
+
+> **Important:** the values for `PG_HOST_PORT`, `PG_USERNAME`, `PG_PASSWORD`, and `PG_DATABASE`
+> must match the `spring.datasource` settings in `src/main/resources/application.yaml`.
+
+`docker/.env` is listed in `.gitignore` and will not be committed.
+
+---
+
 ## Running the Project
 
 The project includes the `spring-boot-docker-compose` dependency. When the application starts,
