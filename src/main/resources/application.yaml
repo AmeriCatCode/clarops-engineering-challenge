@@ -1,0 +1,35 @@
+server:
+  servlet:
+    context-path: /api
+
+spring:
+  application:
+    name: clarops-sr-engineer-challenge
+  docker:
+    compose:
+      enabled: true
+      file: ${DOCKER_COMPOSE_FILE:docker/docker-compose.yml}
+      lifecycle-management: start-only
+  datasource:
+    url: jdbc:postgresql://localhost:5432/clarops_challenge
+    username: clarops
+    password: CHANGE_ME
+    driver-class-name: org.postgresql.Driver
+    type: com.zaxxer.hikari.HikariDataSource
+    hikari:
+      maximum-pool-size: 10
+  jpa:
+    hibernate:
+      ddl-auto: none
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+    database: postgresql
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,mappings
