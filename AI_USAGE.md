@@ -126,7 +126,95 @@ Important:
 * Do not add background jobs, queues, retries, or alerting as required tasks.
 ```
 
-### Prompt 3 — Unit test standard
+### Prompt 4 — Unit test standard and Hurl E2E test plan
+```
+As a developer, help me update the project documentation with a concise testing plan for unit tests and Hurl E2E tests.
+
+Analyze `README.md`, `AI_USAGE.md`, `TASKS.md`, and the current implementation decisions.
+
+Update `TASKS.md` directly by adding or updating the following sections:
+
+## Task — Add unit tests
+
+Add concise unit test tasks based on this testing standard:
+
+* Test method names should follow: `shouldExpectedBehavior_WhenCondition`.
+* Each test should validate one business rule only.
+* Use Arrange / Act / Assert structure.
+* Avoid testing Spring wiring or framework behavior unless necessary.
+* Focus on business rules, state transitions, validation, TTL expiration, final event behavior, duplicate events, late events, and unexpected events.
+* Do not add tests for behavior not defined in the challenge unless it is clearly marked as a documented assumption or decision.
+* For each group of tests, mention which requirement, assumption, or manual decision it validates.
+
+Include unit test tasks for:
+
+* Request validation: required fields, invalid `result`, and incomplete `nextExpectedEvent` / `nextEventTtlSeconds` pair.
+* Trace state transitions: `STARTED`, `WAITING_OTHER_EVENT`, `TTL_EXPIRED_FOR_EVENT`, and `COMPLETED`.
+* TTL calculation from `occurredAt`.
+* Duplicate `eventId` returning `409 Conflict`.
+* Completed and expired traces rejecting further events with `409 Conflict`.
+* Unexpected event while waiting returning `409 Conflict`.
+* Final event behavior: first event as final, final event on active traces, and final event rejected after terminal states.
+* `ERROR` result behavior, confirming that `result` does not directly drive trace status.
+
+## Task — Add Hurl E2E tests
+
+Add concise Hurl E2E test tasks based on this standard:
+
+* Hurl tests must validate the service from the outside using only the public HTTP API.
+* Use only:
+
+  * `POST /events`
+  * `GET /traces/{traceId}/status`
+* Do not rely on direct database queries for Hurl validation.
+* Each Hurl file should cover one clear flow or scenario.
+* Hurl tests should validate HTTP status codes and key response body fields.
+* The tests should run successfully in 100% of the covered scenarios.
+
+Include Hurl test tasks for the required coverage:
+
+* A trace that starts and reaches `STARTED`.
+* A trace that moves to `WAITING_OTHER_EVENT`.
+* A trace that reaches `COMPLETED`.
+* A trace that reaches `TTL_EXPIRED_FOR_EVENT`.
+
+Also include Hurl test tasks for documented implementation decisions:
+
+* Successful `POST /events` returns `201 Created`.
+* Duplicate `eventId` returns `409 Conflict`.
+* Unexpected event while waiting returns `409 Conflict`.
+* Late event after TTL expiration returns `409 Conflict`.
+* Completed trace receiving more events returns `409 Conflict`.
+* Expired trace receiving more events returns `409 Conflict`.
+* Missing or invalid fields return `400 Bad Request`.
+* Unknown trace status query returns `404 Not Found`.
+
+Use this suggested folder structure:
+
+```text
+hurl/
+  started-flow.hurl
+  waiting-other-event-flow.hurl
+  completed-flow.hurl
+  ttl-expired-flow.hurl
+  conflict-scenarios.hurl
+  validation-scenarios.hurl
+```
+
+Update `README.md` directly with a short section explaining how to run the Hurl tests, for example:
+
+```bash
+hurl --test hurl/*.hurl
+```
+
+Important:
+* Edit the files directly.
+* Keep the tasks concise and practical.
+* Do not add implementation code unless explicitly needed for file names or commands.
+* Do not repeat the full README requirements.
+* Keep the scope aligned with the MVP.
+* Make sure the README, TASKS.md, and AI_USAGE.md stay consistent with each other.
+```
 
 ## Manual Decisions
 ### Timestamp Handling 

@@ -94,4 +94,97 @@
   > **Decision:** `metadata` is not included in the status response for this MVP. It is available via the event history if needed.
 - [ ] Return `200 OK` with the response body for all valid traces.
 
+---
+
+## Task 7 — Add unit tests
+
+**Standard:**
+- Test method names follow `shouldExpectedBehavior_WhenCondition`.
+- Each test validates one business rule only.
+- Use Arrange / Act / Assert structure.
+- No Spring context. Tests instantiate classes directly.
+
+### `TraceTransitionServiceTest`
+
+Validates the state machine in isolation. Covers spec scenarios and decisions documented in Task 5.
+
+State transitions:
+- [ ] `shouldReturnStarted_WhenFirstEventHasNoNextExpectedEventAndIsNotFinal`
+- [ ] `shouldReturnWaitingOtherEvent_WhenFirstEventDefinesNextExpectedEvent`
+- [ ] `shouldReturnCompleted_WhenFirstEventIsFinal`
+- [ ] `shouldReturnWaitingOtherEvent_WhenActiveTraceReceivesMatchingEventWithNextExpected`
+- [ ] `shouldReturnCompleted_WhenActiveTraceReceivesFinalEvent`
+- [ ] `shouldReturnStarted_WhenActiveWaitingTraceReceivesMatchingEventWithNoNextExpected`
+
+Conflict detection — validates decisions: terminal states, unexpected/late events:
+- [ ] `shouldThrowConflict_WhenCompletedTraceReceivesAnyEvent`
+- [ ] `shouldThrowConflict_WhenExpiredTraceReceivesAnyEvent`
+- [ ] `shouldThrowConflict_WhenUnexpectedEventArrivesWhileWaiting`
+- [ ] `shouldThrowConflict_WhenLateEventArrivesAfterTtlExpired`
+
+TTL calculation — validates decision: TTL calculated from `occurredAt`, not receipt time:
+- [ ] `shouldSetTtlDeadlineToOccurredAtPlusTtlSeconds_WhenNextExpectedEventDefined`
+
+`ERROR` result — validates spec: `result` does not drive state transitions:
+- [ ] `shouldReturnWaitingOtherEvent_WhenResultIsErrorAndNextExpectedEventDefined`
+- [ ] `shouldReturnStarted_WhenResultIsErrorAndNoNextExpectedEventAndNotFinal`
+
+### `EventRequestValidationTest`
+
+Validates DTO constraints directly using Jakarta Validator. Covers spec validation and the incomplete-pair decision.
+
+- [ ] `shouldFailValidation_WhenEventIdIsMissing`
+- [ ] `shouldFailValidation_WhenResultIsInvalid`
+- [ ] `shouldFailValidation_WhenNextExpectedEventPresentButTtlSecondsMissing`
+- [ ] `shouldFailValidation_WhenNextEventTtlSecondsPresentButExpectedEventMissing`
+
+### `EventServiceTest`
+
+Validates duplicate `eventId` detection at the persistence layer, mocking the repository.
+
+- [ ] `shouldThrowConflict_WhenDuplicateEventIdReceived`
+
+---
+
+## Task 8 — Add Hurl E2E tests
+
+**Standard:**
+- Validate the service from the outside using only the public HTTP API.
+- Each file covers one clear flow or scenario.
+- Validate HTTP status codes and key response body fields.
+- No direct database queries. All assertions use `POST /events` and `GET /traces/{traceId}/status`.
+- All covered scenarios must pass in 100% of runs.
+
+**File structure:**
+```
+hurl/
+  started-flow.hurl
+  waiting-other-event-flow.hurl
+  completed-flow.hurl
+  ttl-expired-flow.hurl
+  conflict-scenarios.hurl
+  validation-scenarios.hurl
+```
+
+Required coverage (spec):
+- [ ] `started-flow.hurl` — POST first event with no continuation → GET returns `STARTED` and `201 Created`.
+- [ ] `waiting-other-event-flow.hurl` — POST event with `nextExpectedEvent` + TTL → GET returns `WAITING_OTHER_EVENT`.
+- [ ] `completed-flow.hurl` — POST events → final event → GET returns `COMPLETED`.
+- [ ] `ttl-expired-flow.hurl` — POST event with `occurredAt` far in the past and `nextEventTtlSeconds: 1` → GET returns `TTL_EXPIRED_FOR_EVENT`.
+
+Conflict scenarios (decisions from Open Requirements #1, 2, 3, 5, 14):
+- [ ] `conflict-scenarios.hurl` — Covers:
+  - Duplicate `eventId` → `409 Conflict`
+  - Unexpected event while `WAITING_OTHER_EVENT` → `409 Conflict`
+  - Late event after TTL expired → `409 Conflict`
+  - Event on `COMPLETED` trace → `409 Conflict`
+  - Event on `TTL_EXPIRED_FOR_EVENT` trace → `409 Conflict`
+
+Validation scenarios (spec + decisions from Open Requirements #9, 10, 12):
+- [ ] `validation-scenarios.hurl` — Covers:
+  - Missing required field → `400 Bad Request`
+  - Invalid `result` value → `400 Bad Request`
+  - Incomplete `nextExpectedEvent` / `nextEventTtlSeconds` pair → `400 Bad Request`
+  - Unknown `traceId` on status query → `404 Not Found`
+
 

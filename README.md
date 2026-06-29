@@ -18,6 +18,27 @@ For setup and run instructions see **[SETUP.md](SETUP.md)**.
 
 ---
 
+## Running the Hurl Tests
+
+Install [Hurl](https://hurl.dev/docs/installation.html), then run all E2E tests with:
+
+```bash
+hurl --test hurl/*.hurl
+```
+
+The app must be running (`./mvnw spring-boot:run`) and the database must be clean before executing the full suite. Each Hurl file is self-contained and covers one clear flow or scenario:
+
+| File | Coverage |
+|------|----------|
+| `started-flow.hurl` | Trace reaches `STARTED` |
+| `waiting-other-event-flow.hurl` | Trace moves to `WAITING_OTHER_EVENT` |
+| `completed-flow.hurl` | Trace reaches `COMPLETED` via `finalEvent = true` |
+| `ttl-expired-flow.hurl` | Trace reaches `TTL_EXPIRED_FOR_EVENT` (lazy evaluation at query time) |
+| `conflict-scenarios.hurl` | Duplicate `eventId`, unexpected event, late event, completed/expired trace receiving new events |
+| `validation-scenarios.hurl` | Missing fields, invalid `result`, incomplete next-event pair, unknown `traceId` |
+
+---
+
 ## Expected Duration
 
 This challenge is designed to be completed in **3 to 4 hours**.
