@@ -40,10 +40,18 @@ curl http://localhost:8080/api/health
 
 ## Running the Hurl Tests
 
-Install [Hurl](https://hurl.dev/docs/installation.html), then run all E2E tests with:
+Install [Hurl](https://hurl.dev/docs/installation.html), then run all E2E tests from the **project root**.
+
+**Bash / Git Bash / WSL:**
 
 ```bash
 hurl --test hurl/*.hurl
+```
+
+**PowerShell (Windows):** PowerShell does not expand glob patterns, so pass the files explicitly:
+
+```powershell
+hurl --test (Get-ChildItem hurl\*.hurl)
 ```
 
 The app must be running (`./mvnw spring-boot:run`) and the database must be clean before executing
