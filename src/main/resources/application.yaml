@@ -13,7 +13,7 @@ spring:
   datasource:
     url: jdbc:postgresql://localhost:5432/clarops_challenge
     username: clarops
-    password: CHANGE_ME
+    password: clarops_pass
     driver-class-name: org.postgresql.Driver
     type: com.zaxxer.hikari.HikariDataSource
     hikari:
@@ -21,12 +21,12 @@ spring:
   jpa:
     hibernate:
       ddl-auto: none
+    open-in-view: false
     show-sql: false
     properties:
       hibernate:
         format_sql: true
     database: postgresql
-    database-platform: org.hibernate.dialect.PostgreSQLDialect
 
 management:
   endpoints:
