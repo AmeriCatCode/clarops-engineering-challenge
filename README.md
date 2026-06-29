@@ -701,3 +701,123 @@ The goal is to evaluate how the candidate works with AI-generated code, how they
 Keep the solution simple.
 
 We are not looking for a perfect event-driven platform. We are looking for a small and thoughtful implementation that shows how you reason about distributed events, TTL expiration, ambiguous requirements, database modeling, AI-assisted development, task decomposition, and testing standards.
+
+---
+
+## Proposed Solution
+
+### Problem Understanding
+
+In a distributed system, a business flow spans multiple services. Each service emits an event when it finishes a step. The challenge is that finishing one step often means another step must happen next — and it must happen within a bounded time window.
+
+Without a centralized tracker, there is no easy way to know whether a flow is progressing normally, stuck waiting for the next step, or silently broken because a critical event never arrived.
+
+This service solves that problem by acting as a stateful watchdog:
+
+1. **It receives events** from any service involved in a flow, keyed by a shared `traceId`.
+2. **It tracks flow state** — determining at any point whether the flow has started, is waiting for a follow-up event, has completed, or has expired because the follow-up never arrived in time.
+3. **It evaluates TTL lazily** — expiration is not detected by a background scheduler, but calculated on demand when the status endpoint is called.
+
+The core business rule is: if an event declares that another event is expected within N seconds, and that event does not arrive within N seconds, the flow is considered expired.
+
+Each event carries two timestamps: `occurredAt` (provided by the caller — when the external service generated the event) and `receivedAt` (set internally by this service when the event is persisted). This separation makes it possible to detect clock skew between producers and to support future observability use cases without a schema change.
+
+---
+
+### Essential Functional Scenarios
+
+#### Core Scenarios
+
+| # | Scenario | Description |
+|---|----------|-------------|
+| 1 | First event, no continuation | A trace is created with status `STARTED`. |
+| 2 | First event with next expected event | Trace is created with status `WAITING_OTHER_EVENT`; TTL window begins. |
+| 3 | First event is also final | Trace is created and immediately moves to `COMPLETED`. |
+| 4 | Expected event arrives before TTL | Trace advances; new state is determined by the arriving event's fields. |
+| 5 | Final event on an in-progress trace | Trace moves to `COMPLETED` if the final event is accepted while the trace is still active (`STARTED` or `WAITING_OTHER_EVENT`). |
+| 6 | Status queried before TTL expires | Returns `WAITING_OTHER_EVENT`. |
+| 7 | Status queried after TTL expires | Returns `TTL_EXPIRED_FOR_EVENT` (evaluated at query time). |
+
+#### Edge Cases
+
+| # | Scenario | Decided Behavior |
+|---|----------|-----------------|
+| 8 | Duplicate `eventId` received | Return `409 Conflict`; do not reprocess or update trace state. |
+| 9 | Unexpected event arrives while `WAITING_OTHER_EVENT` | Return `409 Conflict`; the trace keeps waiting. The event conflicts with the current expected state transition. |
+| 10 | Late event arrives after TTL already expired | Return `409 Conflict`; trace remains `TTL_EXPIRED_FOR_EVENT`. The event conflicts with the terminal expired state. |
+| 11 | Event received for a `COMPLETED` trace | Return `409 Conflict`; completed traces are closed and immutable. |
+| 12 | `result = ERROR` with `nextExpectedEvent` defined | Accept the event. `result` reflects the step outcome, not the flow. Trace moves to `WAITING_OTHER_EVENT`. |
+| 13 | `result = ERROR` without `nextExpectedEvent`, not final | Accept the event. `result` does not drive state transitions. Trace stays in `STARTED`. |
+
+#### Validation Scenarios
+
+| # | Scenario | Behavior |
+|---|----------|----------|
+| 14 | Missing required field (`eventId`, `traceId`, `eventName`, `result`, `occurredAt`) | `400 Bad Request` |
+| 15 | Invalid `result` value (not `SUCCESS` or `ERROR`) | `400 Bad Request` |
+| 16 | `nextExpectedEvent` provided without `nextEventTtlSeconds` (or vice versa) | `400 Bad Request`; they are treated as a required pair. |
+
+#### Persistence / Database Scenarios
+
+| # | Scenario | Behavior |
+|---|----------|----------|
+| 17 | Each received event is persisted | Full event history is retained for auditability. |
+| 18 | Trace state is stored separately | A `trace_state` table holds the current status, last event info, and TTL deadline. |
+| 19 | `metadata` is stored as a JSON column | Flexible enough for MVP without requiring a schema change per use case. |
+| 20 | TTL deadline stored as an absolute timestamp | Calculated at write time from `occurredAt + nextEventTtlSeconds`; comparison at read time requires no calculation. |
+
+---
+
+### POST /events Requirements Matrix
+
+| Scenario | Input Condition | Expected HTTP Response | Trace Status After | Source |
+|----------|----------------|------------------------|-------------------|--------|
+| First event, no `nextExpectedEvent`, not final | New `traceId`, no `nextExpectedEvent`, `finalEvent = false` | `201 Created` | `STARTED` | Spec |
+| First event with `nextExpectedEvent` + TTL | New `traceId`, `nextExpectedEvent` set, `nextEventTtlSeconds` set | `201 Created` | `WAITING_OTHER_EVENT` | Spec |
+| First event is final | New `traceId`, `finalEvent = true` | `201 Created` | `COMPLETED` | Spec |
+| Expected event arrives before TTL | Existing trace in `WAITING_OTHER_EVENT`, `eventName` matches `nextExpectedEvent`, within TTL | `201 Created` | Determined by incoming event fields | Spec |
+| Final event on in-progress trace | Existing trace, `finalEvent = true` | `201 Created` | `COMPLETED` | Decision |
+| Duplicate `eventId` | Same `eventId` sent again | `409 Conflict` | Unchanged | Decision |
+| Event for a `COMPLETED` trace | `traceId` already `COMPLETED` | `409 Conflict` | `COMPLETED` | Decision |
+| Late event (TTL already expired) | Existing trace has TTL deadline in the past; event arrives after expiry | `409 Conflict` | `TTL_EXPIRED_FOR_EVENT` | Decision |
+| Unexpected event while waiting | Existing trace `WAITING_OTHER_EVENT`, `eventName` does not match `nextExpectedEvent` | `409 Conflict` | `WAITING_OTHER_EVENT` | Decision |
+| `result = ERROR` with `nextExpectedEvent` | Any trace, `result = ERROR`, `nextExpectedEvent` defined | `201 Created` | `WAITING_OTHER_EVENT` | Spec |
+| Missing required field | `eventId`, `traceId`, `eventName`, `result`, or `occurredAt` absent | `400 Bad Request` | No change | Spec |
+| Invalid `result` value | `result` is not `SUCCESS` or `ERROR` | `400 Bad Request` | No change | Spec |
+| `nextExpectedEvent` without `nextEventTtlSeconds` | Only one of the pair provided | `400 Bad Request` | No change | Decision |
+| `metadata` present | Optional JSON object included | `201 Created` | Stored alongside event | Decision |
+
+---
+
+### GET /traces/{traceId}/status Requirements Matrix
+
+| Scenario | Query-Time Condition | Expected HTTP Response | Status Returned | Source |
+|----------|---------------------|------------------------|-----------------|--------|
+| Trace not found | `traceId` does not exist | `404 Not Found` | — | Decision |
+| `STARTED` | First event received, no `nextExpectedEvent`, not final | `200 OK` | `STARTED` | Spec |
+| `WAITING_OTHER_EVENT` | Last event set a `nextExpectedEvent`; TTL deadline has not passed at query time | `200 OK` | `WAITING_OTHER_EVENT` | Spec |
+| `TTL_EXPIRED_FOR_EVENT` (lazy evaluation) | Last event set a `nextExpectedEvent`; TTL deadline has passed at query time; expected event never arrived | `200 OK` | `TTL_EXPIRED_FOR_EVENT` | Spec |
+| `COMPLETED` | A `finalEvent = true` event was accepted and persisted | `200 OK` | `COMPLETED` | Spec |
+| `COMPLETED` takes precedence over expired TTL | Final event was accepted while the trace was still in `WAITING_OTHER_EVENT`, before the TTL deadline passed | `200 OK` | `COMPLETED` | Decision |
+
+---
+
+### Open Requirements and Edge Cases
+
+| # | Open Question / Edge Case | Recommended Decision | Justification | Test Coverage |
+|---|--------------------------|---------------------|---------------|---------------|
+| 1 | **Duplicate `eventId`**: The same `eventId` is submitted more than once. | Reject with `409 Conflict`. Do not reprocess or update trace state. | `eventId` is described as a unique event identifier. Silently ignoring duplicates could mask producer bugs; updating state on replay would corrupt the flow. | Unit + Hurl |
+| 2 | **Unexpected `eventName`**: An event arrives for a trace in `WAITING_OTHER_EVENT` but its `eventName` does not match `nextExpectedEvent`. | Return `409 Conflict`. Keep the trace in `WAITING_OTHER_EVENT`. | The event is structurally valid but conflicts with the current expected state transition. `409` signals a state conflict, not a payload problem. | Unit + Hurl |
+| 3 | **Expected event arrives after TTL has already expired**: The correct `eventName` arrives but the TTL deadline has passed. | Return `409 Conflict`. Trace remains `TTL_EXPIRED_FOR_EVENT`. | The event conflicts with the terminal expired state. Accepting it would retroactively fix a broken flow and undermine the reliability of TTL expiration as an alert signal. | Unit + Hurl |
+| 4 | **TTL calculation: `occurredAt` vs. service receipt time**: The spec explicitly leaves this open. | Calculate TTL deadline as `occurredAt + nextEventTtlSeconds`. Store the absolute deadline (`ttl_expires_at`) at write time. | `occurredAt` reflects the actual business moment the step completed, independent of network or processing latency. Using receipt time would penalize slow producers and make the TTL semantics harder to reason about. | Unit |
+| 5 | **Completed trace receiving more events**: An event arrives for a trace that is already `COMPLETED`. | Reject with `409 Conflict`. Completed traces are closed and immutable. | A completed flow has reached its terminal state. Accepting new events would reopen a finished flow, which has no defined meaning in the spec and risks corrupting a clean audit trail. | Unit + Hurl |
+| 6 | **First event is also a final event**: The very first event for a `traceId` has `finalEvent = true`. | Create the trace and immediately set status to `COMPLETED`. | The spec states that a `finalEvent = true` event always marks the flow as completed. The first-event rule does not override this; both rules apply and completion wins. | Unit |
+| 7 | **`result = ERROR` with `nextExpectedEvent` defined**: A step failed but the event still declares a next expected step and TTL. | Accept the event normally. Set trace to `WAITING_OTHER_EVENT`. | The spec explicitly states that `result` reflects the step outcome, not the overall flow status. A flow may have an error at one step yet still expect a follow-up (e.g., a retry notification or a compensating action). | Unit |
+| 8 | **`result = ERROR` without `nextExpectedEvent` and not final**: A step failed, no next step is declared, and `finalEvent` is false. | Accept the event. Set or keep trace in `STARTED`. | The same reasoning applies: `result` does not drive state transitions. The trace simply has no continuation defined, which is a valid open state. | Unit |
+| 9 | **Missing or invalid required fields**: `eventId`, `traceId`, `eventName`, `result`, or `occurredAt` is absent or malformed. | Reject with `400 Bad Request`. Return a descriptive validation error per field. | These fields are the minimum contract for the service to identify and process any event. Without them, no meaningful state can be derived. | Unit + Hurl |
+| 10 | **`nextExpectedEvent` and `nextEventTtlSeconds` as an incomplete pair**: Only one of the two is present. | Reject with `400 Bad Request`. Both must be present together or both must be absent. | A next expected event without a deadline is unenforceable. A deadline without a named event cannot be matched. Treating them as a required pair prevents silent no-ops. | Unit |
+| 11 | **`metadata` storage format**: The spec defines `metadata` as a flexible object with no fixed structure. | Store as a `JSONB` column in PostgreSQL. Return it as-is in query responses. | JSONB allows arbitrary structures without schema migrations, supports indexing if needed later, and is natively supported by the existing PostgreSQL setup. | None required for MVP |
+| 12 | **Trace not found on status query**: `GET /traces/{traceId}/status` is called for a `traceId` that has never received an event. | Return `404 Not Found` with a descriptive message. | Returning a default status for an unknown trace would be misleading. A 404 clearly signals that no flow has been observed for that identifier. | Hurl |
+| 13 | **Avoiding inconsistent trace state under concurrent writes**: Two events for the same `traceId` arrive simultaneously. | Use a unique constraint on `eventId` for deduplication and row-level locking (`SELECT FOR UPDATE`) on `trace_state` during updates. | For this MVP scale, database locking is sufficient. The spec explicitly excludes distributed locks. This keeps the implementation simple while preventing the most common race condition. | None required for MVP |
+| 14 | **Expired traces receiving further events**: A trace in `TTL_EXPIRED_FOR_EVENT` receives a new event (not necessarily the originally expected one). | Return `409 Conflict`. Expired traces are terminal for this MVP. | The event conflicts with the terminal expired state — same reasoning as late events and events on completed traces. Keeping all terminal states consistent under `409` makes the error contract predictable. | Unit |
+| 15 | **`STARTED` traces remaining open indefinitely**: A trace in `STARTED` has no TTL and no defined next step. It can stay open forever. | Accept this as valid for the MVP. No timeout is applied to `STARTED` traces. | The spec only defines TTL for the `WAITING_OTHER_EVENT` transition. Applying a global timeout on `STARTED` is an operational concern (e.g., stale trace cleanup) that is out of scope for this challenge. | None required for MVP |
