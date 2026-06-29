@@ -39,8 +39,7 @@ public class EventService {
       TransitionResult transition = transitionService.apply(existing.orElse(null), request);
 
       Instant now = Instant.now();
-      TraceEvent event = buildEvent(request, now);
-      eventRepository.save(event);
+      TraceEvent event = eventRepository.save(buildEvent(request, now));
 
       TraceState state =
           existing.orElseGet(

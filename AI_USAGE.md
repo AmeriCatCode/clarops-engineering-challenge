@@ -201,7 +201,7 @@ hurl/
   validation-scenarios.hurl
 ```
 
-Update `README.md` directly with a short section explaining how to run the Hurl tests, for example:
+Update `@README.md` directly with a short section explaining how to run the Hurl tests, for example:
 
 ```bash
 hurl --test hurl/*.hurl

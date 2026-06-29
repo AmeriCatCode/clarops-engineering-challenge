@@ -14,7 +14,27 @@ You may use AI tools such as ChatGPT, Claude, Cursor, Copilot, or similar.
 
 ## Running the Project
 
-For setup and run instructions see **[SETUP.md](SETUP.md)**.
+### Prerequisites
+
+- Java 21
+- Docker Desktop (or any Docker host)
+
+### Quick Start
+
+```bash
+# 1. Copy the environment file
+cp docker/example.env docker/.env
+# Edit docker/.env — set PG_PASSWORD, PG_USERNAME, PG_DATABASE to match application.yaml
+
+# 2. Start the application (Docker/PostgreSQL start automatically)
+./mvnw spring-boot:run
+
+# 3. Verify
+curl http://localhost:8080/api/health
+# Expected: clarops sr engineer challenge
+```
+
+> For full environment details, troubleshooting, and code formatting instructions see **[SETUP.md](SETUP.md)**.
 
 ---
 
@@ -26,7 +46,23 @@ Install [Hurl](https://hurl.dev/docs/installation.html), then run all E2E tests 
 hurl --test hurl/*.hurl
 ```
 
-The app must be running (`./mvnw spring-boot:run`) and the database must be clean before executing the full suite. Each Hurl file is self-contained and covers one clear flow or scenario:
+The app must be running (`./mvnw spring-boot:run`) and the database must be clean before executing
+the full suite. Hurl files use fixed `eventId`/`traceId` values, so re-running against stale data
+will produce `409 Conflict` on the first POST of each file.
+
+To reset between runs:
+
+```bash
+# Option A — Docker reset (also re-runs schema init scripts)
+cd docker && docker-compose down -v && docker-compose up -d
+
+# Option B — Truncate only (faster, app stays running)
+docker exec <postgres-container> bash -c \
+  "PGPASSWORD=<PG_PASSWORD> psql -U clarops -d clarops_challenge \
+   -c 'TRUNCATE clarops_challenge_schema.trace_state, clarops_challenge_schema.trace_events RESTART IDENTITY CASCADE;'"
+```
+
+Each Hurl file is self-contained and covers one clear flow or scenario:
 
 | File | Coverage |
 |------|----------|
@@ -842,3 +878,165 @@ Each event carries two timestamps: `occurredAt` (provided by the caller — when
 | 13 | **Avoiding inconsistent trace state under concurrent writes**: Two events for the same `traceId` arrive simultaneously. | Use a unique constraint on `eventId` for deduplication and row-level locking (`SELECT FOR UPDATE`) on `trace_state` during updates. | For this MVP scale, database locking is sufficient. The spec explicitly excludes distributed locks. This keeps the implementation simple while preventing the most common race condition. | None required for MVP |
 | 14 | **Expired traces receiving further events**: A trace in `TTL_EXPIRED_FOR_EVENT` receives a new event (not necessarily the originally expected one). | Return `409 Conflict`. Expired traces are terminal for this MVP. | The event conflicts with the terminal expired state — same reasoning as late events and events on completed traces. Keeping all terminal states consistent under `409` makes the error contract predictable. | Unit |
 | 15 | **`STARTED` traces remaining open indefinitely**: A trace in `STARTED` has no TTL and no defined next step. It can stay open forever. | Accept this as valid for the MVP. No timeout is applied to `STARTED` traces. | The spec only defines TTL for the `WAITING_OTHER_EVENT` transition. Applying a global timeout on `STARTED` is an operational concern (e.g., stale trace cleanup) that is out of scope for this challenge. | None required for MVP |
+
+---
+
+### Key Trade-offs
+
+| Decision | Alternative Considered | Why This Choice |
+|----------|----------------------|-----------------|
+| **Lazy TTL evaluation** — expiration is computed at query time in `TraceStatusService`; `TTL_EXPIRED_FOR_EVENT` is never written to the DB. | Scheduler-based expiration that updates DB rows on a timer. | Simpler, zero background infrastructure. The spec explicitly allows lazy evaluation. The stored `ttl_expires_at` timestamp makes the check a single comparison. |
+| **Pessimistic write lock** (`SELECT FOR UPDATE`) on `trace_state` during event ingestion. | Optimistic locking with `@Version`. | For this problem, a concurrent pair of events for the same `traceId` must serialize. Pessimistic locking is simpler and avoids retry loops — acceptable at MVP scale. |
+| **Dual-table schema**: `trace_events` keeps full event history; `trace_state` holds a single current-state row per trace. | Single table with only current state (no history), or a single table with all events and computed state. | Separating history from current state makes the status query a single indexed lookup while retaining full auditability. Avoids aggregating over an unbounded event history on every GET. |
+| **Uniform `409 Conflict` for all terminal-state rejections** (duplicate ID, unexpected event name, late event, completed/expired trace). | Different status codes per rejection type (e.g., `422` for unexpected event, `410 Gone` for expired). | A single predictable error code for all "event conflicts with current trace state" cases makes the client contract easier to reason about. The `message` field distinguishes the specific cause. |
+| **TTL deadline = `occurredAt + nextEventTtlSeconds`** (stored as absolute timestamp at write time). | Compute from `receivedAt` (server reception time). | `occurredAt` reflects the actual business moment, independent of network or processing latency. Using `receivedAt` would penalize slow producers. Storing the absolute deadline avoids recomputing it on every status query. |
+| **`metadata` stored as `JSONB`**. | Structured columns; or ignored. | No fixed structure is defined in the spec. JSONB allows arbitrary payloads without schema migrations and supports indexing if needed later. |
+
+---
+
+### Request and Response Examples
+
+#### POST /api/events — first event, no continuation → `201 Created`
+
+```json
+POST /api/events
+Content-Type: application/json
+
+{
+  "eventId": "evt-001",
+  "traceId": "trace-123",
+  "eventName": "payment-initiated",
+  "result": "SUCCESS",
+  "occurredAt": "2026-06-29T10:00:00Z"
+}
+```
+
+Response: `201 Created` (empty body)
+
+---
+
+#### POST /api/events — event with next expected event → `201 Created`
+
+```json
+{
+  "eventId": "evt-002",
+  "traceId": "trace-456",
+  "eventName": "payment-initiated",
+  "result": "SUCCESS",
+  "occurredAt": "2026-06-29T10:00:00Z",
+  "nextExpectedEvent": "payment-confirmed",
+  "nextEventTtlSeconds": 300,
+  "metadata": { "country": "MX", "entityId": "company-99" }
+}
+```
+
+Response: `201 Created` (empty body)
+
+---
+
+#### POST /api/events — final event → `201 Created`
+
+```json
+{
+  "eventId": "evt-003",
+  "traceId": "trace-456",
+  "eventName": "payment-confirmed",
+  "result": "SUCCESS",
+  "occurredAt": "2026-06-29T10:02:00Z",
+  "finalEvent": true
+}
+```
+
+Response: `201 Created` (empty body)
+
+---
+
+#### GET /api/traces/{traceId}/status — `WAITING_OTHER_EVENT` → `200 OK`
+
+```json
+{
+  "traceId": "trace-456",
+  "status": "WAITING_OTHER_EVENT",
+  "lastEventName": "payment-initiated",
+  "lastEventResult": "SUCCESS",
+  "nextExpectedEvent": "payment-confirmed",
+  "ttlExpiresAt": "2026-06-29T10:05:00Z",
+  "eventsReceived": 1,
+  "createdAt": "2026-06-29T10:00:01Z",
+  "updatedAt": "2026-06-29T10:00:01Z"
+}
+```
+
+---
+
+#### GET /api/traces/{traceId}/status — `TTL_EXPIRED_FOR_EVENT` → `200 OK`
+
+```json
+{
+  "traceId": "trace-456",
+  "status": "TTL_EXPIRED_FOR_EVENT",
+  "lastEventName": "payment-initiated",
+  "lastEventResult": "SUCCESS",
+  "nextExpectedEvent": "payment-confirmed",
+  "ttlExpiresAt": "2026-06-29T10:05:00Z",
+  "eventsReceived": 1,
+  "createdAt": "2026-06-29T10:00:01Z",
+  "updatedAt": "2026-06-29T10:00:01Z"
+}
+```
+
+> `TTL_EXPIRED_FOR_EVENT` is computed at query time; the DB still stores `WAITING_OTHER_EVENT`.
+
+---
+
+#### GET /api/traces/{traceId}/status — `COMPLETED` → `200 OK`
+
+```json
+{
+  "traceId": "trace-456",
+  "status": "COMPLETED",
+  "lastEventName": "payment-confirmed",
+  "lastEventResult": "SUCCESS",
+  "nextExpectedEvent": null,
+  "ttlExpiresAt": null,
+  "eventsReceived": 2,
+  "createdAt": "2026-06-29T10:00:01Z",
+  "updatedAt": "2026-06-29T10:02:01Z"
+}
+```
+
+---
+
+#### POST /api/events — validation error → `400 Bad Request`
+
+```json
+{
+  "status": 400,
+  "error": "Bad Request",
+  "message": "eventId must not be blank; result must match SUCCESS or ERROR"
+}
+```
+
+---
+
+#### POST /api/events — duplicate or state conflict → `409 Conflict`
+
+```json
+{
+  "status": 409,
+  "error": "Conflict",
+  "message": "Event 'evt-001' has already been received."
+}
+```
+
+---
+
+#### GET /api/traces/{traceId}/status — unknown trace → `404 Not Found`
+
+```json
+{
+  "status": 404,
+  "error": "Not Found",
+  "message": "Trace 'trace-xyz' not found."
+}
+```
